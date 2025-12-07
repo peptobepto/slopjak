@@ -159,3 +159,108 @@ Respond in JSON only with these fields:
     return output
 
 
+def pick_dynamic_segments(srt_path, num_segments=5, target_duration=60, model="llama3.1:8b"):
+    """Pick multiple dynamic ~1-minute segments from a full transcript.
+    
+    Args:
+        srt_path: Path to the full transcript SRT file
+        num_segments: Number of segments to pick (default 5)
+        target_duration: Target duration in seconds (default 60)
+        model: Ollama model to use
+    
+    Returns:
+        List of dicts with keys: start_seconds, duration_seconds, rating, reason
+    """
+    with open(srt_path, "r", encoding="utf-8") as f:
+        srt_content = f.read()
+    
+    entries = _srt_to_text_with_timestamps(srt_content)
+    
+    # Flatten transcript with timestamps
+    flattened = []
+    for start, end, text in entries:
+        flattened.append(f"[{int(start)}-{int(end)}] {text}")
+    
+    transcript_blob = "\n".join(flattened)
+    
+    prompt = f"""
+You are a content critic that only responds in JSON. Given a full video transcript with timestamps, pick the {num_segments} best moments
+that would make the most entertaining short clips for a general TikTok audience. TikTok viewers prefer engaging, funny, or surprising
+moments. Each clip should be approximately {target_duration} seconds long, but you can adjust the start time and duration slightly
+to capture complete thoughts, jokes, or moments (e.g., start at 0:12 and go to 1:05 if that captures a complete moment better than
+starting at 0:00 and going to 1:00).
+
+Transcript (format: [start-end] text):
+---
+{transcript_blob}
+---
+
+Respond in JSON only with a single array called "segments". Each element should have:
+- "start_seconds": integer seconds where the clip should start (can be any timestamp, not just minute marks)
+- "duration_seconds": integer duration in seconds (target {target_duration}, but can be 45-75 seconds to capture complete moments)
+- "rating": float 1.00-100.00 indicating how entertaining this segment is
+- "reason": one sentence explaining why this moment is entertaining
+
+Pick {num_segments} distinct segments that don't overlap significantly. Order them by rating (best first).
+"""
+    
+    print(f"Querying LLM to pick {num_segments} dynamic segments from {os.path.basename(srt_path)}...")
+    response = query_ollama(prompt, model=model)
+    
+    # Extract JSON from markdown code blocks if present
+    import re
+    json_match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', response, re.DOTALL)
+    if json_match:
+        json_str = json_match.group(1)
+    else:
+        # Try to find JSON array directly
+        json_match = re.search(r'(\[.*?\])', response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            json_str = response
+    
+    # Try to fix incomplete JSON (common when response is cut off)
+    # If the JSON is incomplete, try to extract what we can
+    if not json_str.strip().endswith(']'):
+        # Find the last complete segment
+        last_complete = json_str.rfind('}')
+        if last_complete > 0:
+            # Try to close the array
+            json_str = json_str[:last_complete + 1] + ']'
+    
+    try:
+        data = json.loads(json_str)
+        # Handle both formats: direct array or wrapped in object
+        if isinstance(data, list):
+            segments = data
+        elif isinstance(data, dict) and "segments" in data:
+            segments = data["segments"]
+        else:
+            # Try to extract array from response
+            segments = [data] if "start_seconds" in data else []
+        
+        # Validate and sort segments
+        valid_segments = []
+        for seg in segments:
+            if "start_seconds" in seg and "duration_seconds" in seg:
+                valid_segments.append({
+                    "start_seconds": int(seg.get("start_seconds", 0)),
+                    "duration_seconds": int(seg.get("duration_seconds", target_duration)),
+                    "rating": float(seg.get("rating", 50.0)),
+                    "reason": seg.get("reason", "No reason provided")
+                })
+        
+        # Sort by rating descending
+        valid_segments.sort(key=lambda x: x["rating"], reverse=True)
+        
+        print(f"Picked {len(valid_segments)} dynamic segments")
+        return valid_segments
+        
+    except json.JSONDecodeError as e:
+        print(f"Error parsing LLM response: {e}")
+        print(f"Attempted to parse: {json_str[:500]}")
+        print(f"Full response was: {response[:1000]}")
+        return []
+
+

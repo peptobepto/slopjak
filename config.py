@@ -1,5 +1,8 @@
 # File: config.py
 """Configuration constants for the pipeline."""
-IMAGEMAGICK_BINARY = r"C:\Program Files\ImageMagick-7.1.2-Q16-HDRI\magick.exe"
+import shutil
+
+# Auto-detect ImageMagick binary for Linux
+IMAGEMAGICK_BINARY = shutil.which("magick") or shutil.which("convert") or "convert"
 PODCAST_FILENAME = "podcast.mp4"
 FART_FILENAME = "fart.mp4"
